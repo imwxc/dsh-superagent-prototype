@@ -1,0 +1,9 @@
+#!/bin/sh
+# Prepares a ticket workspace with a KDev repository clone: kdev-prepare <group/repo>
+# The executor runs this through sh -c in the parent of $DSH_SUPERAGENT_DIR with the ticket's variables;
+# docs/006-deployment.md "Machine configuration" documents the prepare command.
+set -e
+repo=${1:?usage: kdev-prepare <group/repo>}
+dir=${DSH_SUPERAGENT_DIR:?DSH_SUPERAGENT_DIR is not set}
+kcli=${KCLI:-/Users/wangxianchen/.nvm/versions/node/v22.22.2/bin/kcli}
+"$kcli" kdev git clone "$repo" --dest "$dir"
