@@ -11,11 +11,18 @@ export async function resolveRoleModel(ctx: Context, model: RoleModel): Promise<
   return { provider: value.provider, model: value.model, ...(value.reasoningEffort ? { reasoningEffort: value.reasoningEffort } : {}) }
 }
 
-/** Seed a role's configured model onto a brand-new session before its first request, leaving later manual or durable selections intact. */
-export async function initializeRoleModel(ctx: Context, agent: Agent, model: RoleModel | null): Promise<void> {
+/** Seed a role's configured model onto a brand-new session before its first request, and align an existing session when the configured route changed. */
+export async function initializeRoleModel(ctx: Context, sessionId: string, agent: Agent, model: RoleModel | null): Promise<void> {
   if (!model) return
-  if (agent.session.requestHeader() || agent.session.snapshotEvents().some(event => event.type === 'model/selection')) return
+  // A session the operator manually selected a model on keeps that choice.
+  if (agent.session.snapshotEvents().some(event => event.type === 'model/selection')) return
   const selected = await resolveRoleModel(ctx, model)
+  if (agent.session.requestHeader()) {
+    // The session predates the configured route: re-acknowledge the session-local selection so a role
+    // model edit reaches sessions that were created before the edit.
+    await ctx.sessionController.selectModel({ sessionId: sessionId as never, ...selected }).catch(() => { /* keep the session's current selection */ })
+    return
+  }
   // Avoid selectModel because it mutates the global DSH default; inject the selection for the initial request only.
   agent.session.append('model/selection', selected)
   let initial = true
