@@ -72,8 +72,8 @@ describe('kdevKind', () => {
 })
 
 /** A minimal SourceContext for `pollMrComments`: canned kcli pages, an in-memory KV, and recorded receives. */
-function context(pages: string[]) {
-  const state = new Map<string, unknown>()
+function context(pages: string[], prefill: Record<string, unknown> = {}) {
+  const state = new Map<string, unknown>(Object.entries(prefill))
   const received: Trigger[] = []
   let call = 0
   const value: SourceContext = {
@@ -90,7 +90,7 @@ function context(pages: string[]) {
 }
 
 describe('pollMrComments', () => {
-  it('ingests new mentioned comments and skips own, unmentioned and out-of-window ones', async () => {
+  it('ingests mentioned comments once (own and unmentioned skipped), and never repeats them', async () => {
     const list = JSON.stringify({ items: [mr()] })
     const base = stamp()
     const comments = JSON.stringify({ list: [
@@ -98,22 +98,27 @@ describe('pollMrComments', () => {
       comment({ createdAt: base + 200, author: { username: 'wangxianchen' }, details: { comment: { body: '@superagent 自己的' } } }),
       comment({ createdAt: base + 400, details: { comment: { body: '没带触发词' } } }),
       comment({ createdAt: base + 600 }),
-      // Outside the first-poll window (the cursor defaults to now): must not replay.
-      comment({ createdAt: Date.now() - 30_000 }),
     ] })
-    const { value, received } = context([list, comments])
+    const { value, received } = context([list, comments], { 'kdev-primed': true })
     const result = await pollMrComments(value, config, new AbortController().signal)
     expect(result).toEqual({ read: 2, unreadable: 2 })
     expect(received.map(item => item.id)).toEqual([kdevTriggerId('221369', '1816', base), kdevTriggerId('221369', '1816', base + 600)])
     expect((value.state.get(record<Record<string, number>>('kdev-counts')) as Record<string, number>)['221369']).toBe(4)
+    // The second poll re-reads the same comments; the persisted identities deduplicate them to nothing.
+    value.commands.withSignal = () => ({ run: async () => comments }) as never
+    const second = await pollMrComments(value, config, new AbortController().signal)
+    expect(second).toEqual({ read: 0, unreadable: 0 })
+    expect(received).toHaveLength(2)
   })
   it('reads a repo again when a new comment raises its count', async () => {
     const list = JSON.stringify({ items: [mr()] })
     const updated = JSON.stringify({ items: [mr({ commentCount: 5 })] })
     const { value, received } = context([list, JSON.stringify({ list: [comment()] }), updated, JSON.stringify({ list: [comment({ createdAt: stamp(300), details: { comment: { body: '@superagent 再看一眼' } } })] })])
+    // Fresh state: the first poll primes and replays nothing; a repo-level skip follows until the count changes again.
     await pollMrComments(value, config, new AbortController().signal)
+    expect(received).toHaveLength(0)
     const second = await pollMrComments(value, config, new AbortController().signal)
     expect(second).toEqual({ read: 1, unreadable: 0 })
-    expect(received).toHaveLength(2)
+    expect(received).toHaveLength(1)
   })
 })

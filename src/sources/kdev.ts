@@ -8,15 +8,14 @@ import { pause } from './poll.ts'
 import type { ChannelLink, SourceKind } from './kind.ts'
 
 export const SOURCE = 'kdev'
-/** Read cursor: the newest comment epoch (ms) already ingested; the first run starts at the process start and replays nothing. */
-const cursor = record<number>('kdev-cursor')
+/** Whether the Source has completed its first poll; the first poll reads only comments written after it starts, later polls never use time. */
+export const primed = record<boolean>('kdev-primed')
+/** Per-MR comment identities (`createdAt:username`) already ingested, so a comment that kdev exposes late is still read exactly once. */
+const seenComments = record<Record<string, string[]>>('kdev-seen')
 /** Per-repo comment counts of the last poll; the count includes global comments, so a change means new comments to read. */
 const counts = record<Record<string, number>>('kdev-counts')
 /** The operator's KDev username, learned from `kcli whoami` on the first poll. */
 const self = record<string>('kdev-self')
-/** A poll window steps back 5 s so late-written comments are not missed; deterministic trigger IDs deduplicate the overlap. */
-const OVERLAP_MS = 5_000
-
 const KdevConfigSchema = z.object({
   cli: z.string().min(1).default('kcli'),
   repos: z.array(z.object({ repoId: z.string().regex(/^\d+$/), name: z.string().trim().max(120).optional() }).strict())
@@ -90,11 +89,11 @@ export async function pollMrComments(ctx: SourceContext, config: KdevConfig, sig
     operator = who.loginId
     if (operator) ctx.state.set(self, operator)
   }
-  const end = Date.now()
-  const floor = Math.max((ctx.state.get(cursor) ?? end) - OVERLAP_MS, 0)
+  const primedAlready = ctx.state.get(primed) === true
   const known = ctx.state.get(counts) ?? {}
+  const seenStored = ctx.state.get(seenComments) ?? {}
+  const seen = new Map<string, Set<string>>(Object.entries(seenStored).map(([mrKey, ids]) => [mrKey, new Set(ids)]))
   const nextCounts: Record<string, number> = {}
-  const seen = new Set<string>()
   let read = 0
   let unreadable = 0
   for (const repo of config.repos) {
@@ -106,11 +105,13 @@ export async function pollMrComments(ctx: SourceContext, config: KdevConfig, sig
       if (mr.commentCount === 0) continue
       const page = CommentPageSchema.parse(JSON.parse(await run(['kdev', 'mr', 'comments', '--repo-id', repo.repoId, '--mr-id', String(mr.id), '--json'])))
       const context = { repoId: repo.repoId, mr: String(mr.id), title: mr.title, branch: mr.sourceBranch }
+      // The first poll replays nothing (a fresh Source starts from now); later polls read every comment not seen before,
+      // because kdev exposes comments with a delay that a time window would turn into permanently lost messages.
+      const mrSeen = seen.get(context.mr) ?? new Set<string>()
       for (const comment of page.list) {
-        if (comment.createdAt <= floor || comment.createdAt > end) continue
         const identity = `${comment.createdAt}:${comment.author.username}`
-        if (seen.has(identity)) continue
-        seen.add(identity)
+        if (mrSeen.has(identity)) continue
+        if (!primedAlready && comment.createdAt <= Date.now()) { mrSeen.add(identity); continue }
         const trigger = kdevTrigger(comment, config, context)
         if (!trigger) { unreadable += 1; continue }
         await ctx.receive(trigger)
@@ -122,10 +123,12 @@ export async function pollMrComments(ctx: SourceContext, config: KdevConfig, sig
           })
         read += 1
       }
+      seen.set(context.mr, mrSeen)
     }
   }
+  ctx.state.set(primed, true)
   ctx.state.set(counts, nextCounts)
-  ctx.state.set(cursor, end)
+  ctx.state.set(seenComments, Object.fromEntries([...seen.entries()].map(([mrKey, ids]) => [mrKey, [...ids]].slice(-200))))
   return { read, unreadable }
 }
 
