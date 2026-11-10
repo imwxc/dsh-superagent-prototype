@@ -6,6 +6,7 @@ import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
+import type { Trigger } from '../src/core/index.ts'
 
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
@@ -95,4 +96,24 @@ it('answers a prompt save that lost a race with 409, and a settings body over 12
   expect(await call('PUT', 'settings/executor', { value, revision: 0 })).toEqual({ status: 400,
     body: { error: `Request exceeds ${128 * 1024} bytes` } })
   expect(saves).toEqual([])
+})
+
+it('injects a manual trigger through the same pass pipeline', async () => {
+  const received: unknown[] = []
+  let pass = 0
+  const call = serve({ receiveTrigger: (trigger: Trigger) => { received.push(trigger); return 'stored' }, requestPass: () => { pass += 1 } })
+  const ok = await call('POST', 'triggers/manual', { text: '  帮我看看这个服务  ', sessionId: 'chat-1' })
+  expect(ok).toEqual({ status: 200, body: { triggerId: expect.stringMatching(/^manual:/), result: 'stored' } })
+  expect(received[0]).toMatchObject({
+    source: 'manual', threads: [{ source: 'manual', id: 'chat-1' }],
+    actor: { source: 'manual', id: 'operator' }, human: true, addressed: 'direct',
+    text: '帮我看看这个服务', meta: { sessionId: 'chat-1' },
+  })
+  expect(pass).toBe(1)
+  // An empty message and a malformed session id fail before any receive.
+  expect(await call('POST', 'triggers/manual', { text: '   ' })).toMatchObject({ status: 400 })
+  expect(await call('POST', 'triggers/manual', { text: 'hi', sessionId: 'bad id!' })).toMatchObject({ status: 400 })
+  expect(await call('POST', 'triggers/manual', {})).toMatchObject({ status: 400 })
+  expect(received).toHaveLength(1)
+  expect(pass).toBe(1)
 })

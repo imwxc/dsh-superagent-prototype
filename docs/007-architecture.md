@@ -369,6 +369,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/github-read.ts` | CI snapshots, repository reads, the `github/` resources, and `githubThreadContext`: an Issue's or pull request's conversation by page |
 | `src/sources/feishu.ts` | The Feishu kind and plugin entry, exported as `./feishu-watch` |
 | `src/sources/kim.ts` | The Kim kind and plugin entry, exported as `./kim-watch`: a poll of the kim-cli @-me feed for the listed chats, and replies through a group webhook bot |
+| `src/sources/manual.ts` | The built-in Manual kind: management-API messages as Triggers, replies settle on the panel |
 | `src/sources/feishu-trigger.ts` | Feishu messages as Triggers, by one rule for live events, history pages and topic pages |
 | `src/sources/feishu-loops.ts` | The Feishu loops: the event consumer, history recovery, chat names and polling of subscribed topics |
 | `src/sources/feishu-channel.ts` | The Feishu Channel: topic replies, `sent` or `gone` |
@@ -410,6 +411,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
 | `tests/kim.spec.ts` | The Kim Source: @-me translation, the poll window and its cursor, admission rows, and webhook replies |
+| `tests/manual.spec.ts` | The Manual Source: the trigger shape, the operator roster default, and settled channel sends |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |

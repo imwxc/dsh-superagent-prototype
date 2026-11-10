@@ -40,6 +40,7 @@ import { Passes } from './passes.ts'
 import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
+import { manualKind } from '../sources/manual.ts'
 import { Sessions } from './sessions.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
@@ -112,6 +113,7 @@ export class Runtime extends Service implements SourceHost {
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
+      sources.register(manualKind)
       const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
@@ -223,7 +225,8 @@ export class Runtime extends Service implements SourceHost {
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
-      checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
+      checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog(),
+      receiveTrigger: trigger => passes.receive(trigger) }
   }
   /** Idempotent stop; concurrent or repeated calls share the same shutdown promise. */
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }

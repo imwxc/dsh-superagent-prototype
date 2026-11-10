@@ -97,6 +97,7 @@ export interface PanelServer {
   /** Requests with undeclared query params or invalid body presence; asserted empty after each test. */
   misuse: string[]
   queued: Set<string>
+  manual: string[]
   searching?: (query: string) => Promise<void>
   setup: SetupView
   health: Record<string, Health>
@@ -247,7 +248,7 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
-    health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), manual: [], dropped: [], failing: [],
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -320,6 +321,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     return { removed, thread: params.key, context_delivery: 'injected' }
   } },
   'POST triggers/:id/requeue': { answer: ({ params }) => { server.queued.add(params.id); return { queued: true } } },
+  'POST triggers/manual': { body: true, answer: ({ body }) => { server.manual.push(body.text); return { triggerId: 'manual:test-1', result: 'stored' } } },
   'GET decisions': { query: ['kind', 'window', 'offset', 'limit'], answer: ({ query }) =>
     ({ items: query.kind === 'ignore' ? [] : [acceptDecision()], next_offset: null }) },
   'POST decisions/:id/dismiss': { answer: ({ params }) => params.id === 'u1' ? { dismissed: true } : refuse(404,

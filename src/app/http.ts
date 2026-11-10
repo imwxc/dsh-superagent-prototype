@@ -11,7 +11,8 @@ import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, b
 import { policyVersion } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
-import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
+import { UserError, type EngineForPeople, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { manualTrigger } from '../sources/manual.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import type { DshExecutor } from '../executor/dsh.ts'
 import type { Health } from '../sources/host.ts'
@@ -52,6 +53,8 @@ export interface HttpHost {
   ticketEnvironment(ticket: Ticket): Variable[]
   checkSetup(): void
   requestPass(): void
+  /** Ingests one trigger through the same serialized pass pipeline the Sources use. */
+  receiveTrigger(trigger: Trigger): ReceiveResult
   models(): Promise<ModelCatalog>
 }
 /**
@@ -144,6 +147,11 @@ const DecisionsQuery = z.object({ kind: z.string().default(''), window: z.litera
   limit: limit(30, 200) })
 const count = z.coerce.number().int().nonnegative()
 const PromptsQuery = z.object({ revision: count.optional(), offset: count.default(0) })
+/** One operator message injected from the management panel/API; a session id keeps separate conversations on separate threads. */
+const ManualTriggerSchema = z.object({
+  text: z.string().trim().min(1).max(100_000),
+  sessionId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).optional(),
+})
 const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])
 const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
@@ -178,6 +186,15 @@ function routes(runtime: HttpHost): Routes {
       const queued = runtime.engine.reevaluate(params.id)
       runtime.requestPass()
       return { queued }
+    },
+    'POST triggers/manual': async ({ body }) => {
+      const request = ManualTriggerSchema.parse(await body())
+      let trigger
+      try { trigger = manualTrigger(request.text, request.sessionId ?? undefined) }
+      catch (error) { throw new RouteError(400, error instanceof Error ? error.message : String(error)) }
+      const result = runtime.receiveTrigger(trigger)
+      runtime.requestPass()
+      return { triggerId: trigger.id, result }
     },
     'GET decisions': ({ query }) => {
       const { kind, window, offset, limit } = DecisionsQuery.parse(query)
