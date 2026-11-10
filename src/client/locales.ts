@@ -105,6 +105,7 @@ const TEXT = {
   searchFound: ['找到 {tickets} 个工单、{threads} 个线程、{items} 条触发', 'Found {tickets} Tickets, {threads} Threads and {items} Triggers'],
   searchNone: ['没有找到。可以输入触发文字、GitHub PR 或 Issue 链接、#编号、飞书消息链接或 om_ 开头的消息 id。', 'Nothing found. Try Trigger text, a GitHub PR or Issue link, #number, a Feishu message link, or an om_ message id.'],
   searchNoneGithub: ['没有找到。可以输入触发文字、GitHub PR 或 Issue 链接或 #编号。', 'Nothing found. Try Trigger text, a GitHub PR or Issue link, or #number.'],
+  searchNoneGeneric: ['没有找到。可以输入触发文字或工单关键词。', 'Nothing found. Try trigger text or ticket keywords.'],
   'ticket.ended': ['已结束', 'ended'],
   sessionListNotReady: ['Session 列表尚未加载，请稍后重试。', 'The Session list has not loaded yet; try again shortly.'],
   sessionNotListed: ['这个 Session 不在当前会话列表里，可能已被归档或删除。', 'This Session is not in the current list; it may have been archived or deleted.'],

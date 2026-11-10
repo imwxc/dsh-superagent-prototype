@@ -73,7 +73,8 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
   const go = (route: Route) => () => { onClose(); navigate(route) }
   return <div className="dt-search-results" role="region" aria-label={t('searchLabel')}>
     <div className="dt-search-head">
-      <span className="dt-hint">{empty ? t(setup?.accounts?.feishu ? 'searchNone' : 'searchNoneGithub')
+      <span className="dt-hint">{empty ? t(setup?.accounts?.feishu ? 'searchNone'
+        : setup?.accounts?.agent ? 'searchNoneGithub' : 'searchNoneGeneric')
         : t(result.items.length >= 20 ? 'searchFoundCapped' : 'searchFound', counts)}</span>
       <Button variant="ghost" size="sm" icon={<Icon name="close" size={14} />} aria-label={t('close')} onClick={onClose} />
     </div>
