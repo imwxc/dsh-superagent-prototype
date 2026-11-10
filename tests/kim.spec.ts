@@ -3,7 +3,8 @@ import type { Trigger } from '../src/core/index.ts'
 import { record } from '../src/kv.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import {
-  KimConfigSchema, kimKind, kimTrigger, kimTriggerId, pollAtMe, sendKim, setKimSendConfig, resetKimToken, SOURCE,
+  KimConfigSchema, kimCallbackTrigger, kimKind, kimTrigger, kimTriggerId, pollAtMe, sendKim, setKimSendConfig, resetKimToken,
+  startCallbackServer, SOURCE,
 } from '../src/sources/kim.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { SettingsSchema } from '../src/policy.ts'
@@ -175,3 +176,85 @@ describe('sendKim', () => {
     await expect(sendKim({} as Parameters<typeof sendKim>[0], message)).rejects.toThrow(/appKey or secretKey/)
   })
 })
+
+/** One callback event in the shape the OpenAPI gateway posts (verified against cyber-tower-node's receiver DTO). */
+const callbackEvent = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  uuid: 'u-1', tagList: [], token: 'tok-1', timestamp: 1794228285107, appId: 'app-1', eventType: 'message',
+  info: {
+    messageKey: 'OMSG_callone', sender: { userId: '233300731420243', username: 'jiangduo03', name: '姜铎', userType: 'user' },
+    sessionType: 'group', session: { from: '233300731420243', to: '', groupId: '7377459320328271' },
+    mentionAll: false, mentionList: [{ username: 'dsh_bot' }], messageType: 'text',
+    content: '@dsh_bot 帮忙看下这个服务', contentWithoutAtBot: '帮忙看下这个服务',
+  },
+  callBackUrl: 'http://callback', botKwaiUserId: 42, urlSchemeParam: null,
+  ...over,
+})
+
+describe('kimCallbackTrigger', () => {
+  it('translates a group callback into the same trigger shape the poll produces', () => {
+    expect(kimCallbackTrigger(callbackEvent())).toMatchObject({
+      id: kimTriggerId('OMSG_callone'), source: 'kim',
+      threads: [{ source: 'kim', id: '7377459320328271' }],
+      actor: { source: 'kim', id: 'jiangduo03' }, human: true, addressed: 'mention',
+      at: new Date(1794228285107).toISOString(),
+      text: '帮忙看下这个服务',
+      channel: { source: 'kim', thread: 'kim:7377459320328271', address: { session: '7377459320328271' } },
+      meta: { sessionId: '7377459320328271', messageKey: 'OMSG_callone', senderName: '姜铎' },
+    })
+  })
+  it('skips direct messages and senders without a username, and rejects garbage payloads', () => {
+    expect(kimCallbackTrigger(callbackEvent({ info: { ...callbackEvent().info as object, sessionType: 'p2p' } }))).toBeUndefined()
+    expect(kimCallbackTrigger(callbackEvent({ info: { ...callbackEvent().info as object, session: { from: '1', to: '2', groupId: null } } }))).toBeUndefined()
+    expect(kimCallbackTrigger(callbackEvent({ info: { ...callbackEvent().info as object, sender: { userId: '1', username: '', name: '', userType: null } } }))).toBeUndefined()
+    expect(() => kimCallbackTrigger({ token: 't', timestamp: 1, info: 'not an object' })).toThrow()
+  })
+})
+
+describe('startCallbackServer', () => {
+  /** A minimal SourceContext recording receives; the callback server only needs `receive` and `threads`. */
+  function recordingContext() {
+    const received: Trigger[] = []
+    const value = {
+      receive: async (trigger: Trigger) => { received.push(trigger) },
+      threads: { describe: () => {} },
+    } as unknown as SourceContext
+    return { value, received }
+  }
+  const config = KimConfigSchema.parse({ chats: [{ sessionId: '7377459320328271' }], callbackPort: 0, callbackToken: 'tok-1' })
+  const post = (port: number, path: string, body: unknown) => fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+
+  it('verifies the token, ingests group events, and skips direct messages', async () => {
+    const controller = new AbortController()
+    const { value, received } = recordingContext()
+    const server = await startCallbackServer(value, config, controller.signal)
+    try {
+      const port = (server.address() as { port: number }).port
+      expect((await fetch(`http://127.0.0.1:${port}/kim/callback`)).status).toBe(200)
+      expect((await post(port, '/kim/other', callbackEvent())).status).toBe(404)
+      expect((await post(port, '/kim/callback', { token: 'wrong', timestamp: 1, info: {} })).status).toBe(400)
+      expect((await post(port, '/kim/callback', callbackEvent({ token: 'wrong' }))).status).toBe(403)
+      expect((await post(port, '/kim/callback', callbackEvent({ info: { ...callbackEvent().info as object, sessionType: 'p2p' } }))).status).toBe(200)
+      const ok = await post(port, '/kim/callback', callbackEvent())
+      expect(ok.status).toBe(200)
+      await expect(ok.json()).resolves.toEqual({ code: 1, message: 'SUCCESS' })
+      expect(received.map(item => item.id)).toEqual([kimTriggerId('OMSG_callone')])
+      expect(received[0]).toMatchObject({ actor: { id: 'jiangduo03' }, text: '帮忙看下这个服务' })
+    } finally { controller.abort(); await closeCallbackServerForTest(server) }
+  })
+  it('refuses to serve without a configured token', async () => {
+    const controller = new AbortController()
+    const { value, received } = recordingContext()
+    const server = await startCallbackServer(value, KimConfigSchema.parse({ callbackPort: 0 }), controller.signal)
+    try {
+      const port = (server.address() as { port: number }).port
+      expect((await post(port, '/kim/callback', callbackEvent())).status).toBe(403)
+      expect(received).toEqual([])
+    } finally { controller.abort(); await closeCallbackServerForTest(server) }
+  })
+})
+
+/** Closes a test server after its abort listener ran, so the port frees before the next test binds. */
+async function closeCallbackServerForTest(server: import('node:http').Server): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await new Promise<void>(resolve => server.close(() => resolve()))
+}

@@ -1,5 +1,6 @@
-/** Kim source kind: polls the operator's @-me feed through kim-cli and replies through a group webhook bot. */
+/** Kim source kind: receives event callbacks from the OpenAPI gateway (with the kim-cli @-me poll as fallback) and replies as the message-number bot. */
 import type { Context } from '@deepseek-ai/cordis'
+import http from 'node:http'
 import { z } from 'zod'
 import { key, threadKey, type ChannelRef, type OutboundMessage, type Trigger } from '../core/index.ts'
 import { checkedImText } from '../infra/text.ts'
@@ -26,6 +27,8 @@ const KimConfigSchema = z.object({
   chats: z.array(z.object({ sessionId: z.string().regex(/^\d+$/), name: z.string().trim().max(60).optional() }).strict())
     .refine(chats => new Set(chats.map(chat => chat.sessionId)).size === chats.length, 'Duplicate session IDs').default([]),
   pollSeconds: z.number().int().min(10).max(3600).default(30),
+  callbackPort: z.number().int().min(0).max(65535).default(8790),
+  callbackToken: z.string().trim().max(128).default(''),
 }).strict()
 export type KimConfig = z.infer<typeof KimConfigSchema>
 export { KimConfigSchema }
@@ -55,6 +58,32 @@ export function kimTrigger(item: unknown): Trigger | undefined {
     actor: { source: SOURCE, id: username }, human: entry.senderType === 'user', addressed: 'mention',
     at: new Date(entry.createTime).toISOString(), text: entry.message.content, channel: kimChannel(sessionId),
     meta: { sessionId, messageKey: entry.messageKey, ...(entry.message.sender.name ? { senderName: entry.message.sender.name } : {}) } }
+}
+
+/** One event the OpenAPI gateway POSTs to the callback URL; the shape was verified against cyber-tower-node's live receiver. */
+const CallbackSchema = z.looseObject({
+  token: z.string(), timestamp: z.number(),
+  info: z.looseObject({
+    messageKey: z.string().min(1),
+    sender: z.looseObject({ userId: z.string().default(''), username: z.string().default(''), name: z.string().default(''), userType: z.string().nullable().default(null) }),
+    sessionType: z.string().default(''),
+    session: z.looseObject({ groupId: z.string().nullable().default(null) }),
+    mentionAll: z.boolean().default(false),
+    mentionList: z.array(z.unknown()).default([]),
+    content: z.string().default(''),
+    contentWithoutAtBot: z.string().default(''),
+  }),
+})
+/** Translates one callback event; group messages with a sender username only, because the Policy names people by username. */
+export function kimCallbackTrigger(event: unknown): Trigger | undefined {
+  const parsed = CallbackSchema.parse(event)
+  const sessionId = parsed.info.session.groupId
+  const username = parsed.info.sender.username
+  if (parsed.info.sessionType === 'p2p' || !sessionId || !username) return undefined
+  return { id: kimTriggerId(parsed.info.messageKey), source: SOURCE, threads: [{ source: SOURCE, id: sessionId }],
+    actor: { source: SOURCE, id: username }, human: parsed.info.sender.userType === 'user', addressed: 'mention',
+    at: new Date(parsed.timestamp).toISOString(), text: parsed.info.contentWithoutAtBot || parsed.info.content, channel: kimChannel(sessionId),
+    meta: { sessionId, messageKey: parsed.info.messageKey, ...(parsed.info.sender.name ? { senderName: parsed.info.sender.name } : {}) } }
 }
 
 /** kim-cli reads `--start` and `--end` as local `YYYY-MM-DDTHH:mm`. */
@@ -112,12 +141,67 @@ export async function sendKim(_host: Pick<SourceContext, 'commands'>, message: O
   throw new Error(`Kim message refused (${parsed.code ?? response.status}): ${(parsed.message ?? text).slice(0, 300)}`)
 }
 
+const CALLBACK_PATH = '/kim/callback'
+const CALLBACK_BODY_LIMIT = 128 * 1024
+/** Reads one JSON callback body; oversize bodies fail before parsing. */
+async function readCallbackBody(req: http.IncomingMessage): Promise<unknown> {
+  let size = 0
+  const chunks: Buffer[] = []
+  for await (const chunk of req) {
+    const bytes = Buffer.from(chunk)
+    size += bytes.length
+    if (size > CALLBACK_BODY_LIMIT) throw new Error(`The callback body exceeds ${CALLBACK_BODY_LIMIT} bytes`)
+    chunks.push(bytes)
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
+}
+function reply(res: http.ServerResponse, status: number, value: unknown): void {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value))
+}
+/**
+ * Serves Kim event callbacks: token check first (the configured token is the one registered through `subscribe/update`),
+ * then translate and ingest; the deterministic trigger IDs deduplicate the gateway's re-deliveries.
+ */
+export async function startCallbackServer(ctx: SourceContext, config: KimConfig, signal: AbortSignal): Promise<http.Server> {
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost')
+    if (req.method === 'GET' && url.pathname === CALLBACK_PATH) { reply(res, 200, { ok: true }); return }
+    if (req.method !== 'POST' || url.pathname !== CALLBACK_PATH) { reply(res, 404, { code: 1, message: 'not found' }); return }
+    void (async () => {
+      try {
+        const body = await readCallbackBody(req)
+        const parsed = CallbackSchema.safeParse(body)
+        if (!parsed.success) { reply(res, 400, { code: 1, message: 'unrecognized callback payload' }); return }
+        if (!config.callbackToken || parsed.data.token !== config.callbackToken) { reply(res, 403, { code: 1, message: 'token mismatch' }); return }
+        if (signal.aborted) { reply(res, 503, { code: 1, message: 'the Source is stopping' }); return }
+        const trigger = kimCallbackTrigger(parsed.data)
+        if (trigger) {
+          await ctx.receive(trigger)
+          for (const ref of trigger.threads)
+            ctx.threads.describe(threadKey(ref), { facts: { chat: { label: { zh: '群', en: 'Chat' }, value: String(trigger.meta.sessionId) } } })
+        }
+        reply(res, 200, { code: 1, message: 'SUCCESS' })
+      } catch (error) { reply(res, 500, { code: 1, message: error instanceof Error ? error.message : String(error) }) }
+    })()
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(config.callbackPort, '0.0.0.0', () => resolve())
+  })
+  signal.addEventListener('abort', () => { server.close() }, { once: true })
+  return server
+}
+/** Stops one callback server; resolves once the port is released. */
+function closeCallbackServer(server: http.Server): Promise<void> {
+  return new Promise(resolve => { if (!server.listening) resolve(); else server.close(() => resolve()) })
+}
+
 export const kimKind: SourceKind<KimConfig> = {
   kind: SOURCE,
   title: { zh: 'Kim', en: 'Kim' },
   description: {
-    zh: '轮询 kim-cli「@ 我的消息」，接收下列群里的 @ 消息，经群里自定义机器人的 webhook 回复。',
-    en: 'Polls the kim-cli @-me feed for messages in these chats and replies through a group webhook bot.',
+    zh: '接收下列群里 @ 机器人的消息（Kim 事件回调，kim-cli 轮询 @ 我兜底），以消息号身份回复。',
+    en: 'Receives messages that mention the bot in these chats through Kim event callbacks (the kim-cli @-me poll stays as a fallback) and replies as the message number.',
   },
   schema: KimConfigSchema,
   fields: [
@@ -134,8 +218,12 @@ export const kimKind: SourceKind<KimConfig> = {
         { key: 'sessionId', type: 'text', label: { zh: '群', en: 'Chat' }, pattern: '\\d+' },
         { key: 'name', type: 'text', label: { zh: '名字', en: 'Name' }, optional: true }] },
     { key: 'pollSeconds', type: 'number', advanced: true, min: 10, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / s' } },
+    { key: 'callbackPort', type: 'number', advanced: true, min: 0, max: 65535, label: { zh: '回调端口', en: 'Callback port' },
+      hint: { zh: '接收 Kim 事件回调的 HTTP 端口；在 subscribe/update 注册 http://<主机>:<端口>/kim/callback。', en: 'The HTTP port for Kim event callbacks; register http://<host>:<port>/kim/callback through subscribe/update.' } },
+    { key: 'callbackToken', type: 'text', label: { zh: '回调校验 token', en: 'Callback token' },
+      hint: { zh: '与 subscribe/update 注册的 token 一致；回调携带不匹配 token 会被拒绝。', en: 'The token registered through subscribe/update; callbacks carrying a mismatching token are rejected.' } },
   ],
-  health: ['kim'],
+  health: ['kim', 'kim-callback'],
   scope({ meta }, config) {
     const chat = config.chats.find(item => item.sessionId === meta.sessionId)
     return chat ? { listened: true, observed: false, row: chat.sessionId } : { listened: false, reason: 'chat_not_listed' }
@@ -156,8 +244,8 @@ export const kimKind: SourceKind<KimConfig> = {
       { key: 'id', type: 'text', label: { zh: '用户名', en: 'Username' } },
       { key: 'name', type: 'text', label: { zh: '名字', en: 'Name' }, optional: true }] }],
     explicit: {
-      zh: '名单里的人在接收的群里 @ 监听账号。监听账号是 kim-cli 登录的操作者 Kim 身份，回复则来自群里的 webhook 机器人。',
-      en: 'Someone on the list mentions the watched account in a received chat. The watched account is the operator\'s Kim identity (the kim-cli login); replies come from the chat\'s webhook bot.',
+      zh: '名单里的人在接收的群里 @ 机器人（经 Kim 事件回调接收，kim-cli「@ 我」轮询兜底）。回复来自消息号身份。',
+      en: 'Someone on the list mentions the bot in a received chat (received through Kim event callbacks, with the kim-cli @-me poll as a fallback). Replies come from the message-number identity.',
     },
     rows(stored) {
       const config = KimConfigSchema.parse(stored)
@@ -214,11 +302,25 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   await ctx.ready
   if (!ctx.configured()) { ctx.report(SOURCE, health('paused', 'setupPending')); return }
   let failures = 0
+  let callback: { server: http.Server; port: number; token: string } | undefined
   while (!signal.aborted) {
     const config = ctx.config<KimConfig>(SOURCE)
-    if (!config) { ctx.report(SOURCE, health('paused', 'sourceOff')); setKimSendConfig(undefined) }
-    else {
+    if (!config) {
+      ctx.report(SOURCE, health('paused', 'sourceOff')); setKimSendConfig(undefined)
+      if (callback) { await closeCallbackServer(callback.server); callback = undefined; ctx.report('kim-callback', health('paused', 'sourceOff')) }
+    } else {
       setKimSendConfig({ appKey: config.appKey, secretKey: config.secretKey, gatewayUrl: config.gatewayUrl })
+      if (!callback || callback.port !== config.callbackPort || callback.token !== config.callbackToken) {
+        if (callback) await closeCallbackServer(callback.server)
+        try {
+          const server = await startCallbackServer(ctx, config, signal)
+          callback = { server, port: config.callbackPort, token: config.callbackToken }
+          ctx.report('kim-callback', { state: 'ready', detail: `listening on :${config.callbackPort}`, at: new Date().toISOString() })
+        } catch (error) {
+          callback = undefined
+          if (!signal.aborted) ctx.report('kim-callback', health('error', 'callbackBindFailed', { port: String(config.callbackPort), error: String(error) }))
+        }
+      }
       try {
         const { read, unreadable } = await pollAtMe(ctx, config, signal)
         failures = 0
@@ -232,6 +334,7 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
     await pause((config?.pollSeconds ?? 30) * 1000, signal)
   }
   setKimSendConfig(undefined)
+  if (callback) await closeCallbackServer(callback.server)
 }
 
 export const name = 'dsh-superagent-kim'
