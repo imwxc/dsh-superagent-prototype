@@ -146,9 +146,9 @@ export class Runtime extends Service implements SourceHost {
           const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
           const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
           if (followup) sessions.relay(followup.id, followup.text)
-          // Notify the ticket's conversations whenever it ends via a pull request.
+          // Notify the ticket's conversations whenever it ends via a pull request; no repository means no pull requests.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
-          if (ended && setup.configured()) {
+          if (ended && setup.configured() && setup.deployment.repository) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
             for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
           }
@@ -184,7 +184,7 @@ export class Runtime extends Service implements SourceHost {
   get feishuProblem(): SetupProblem | undefined { return this.setup.feishuProblem }
   links(): LinkTarget {
     const resolved = this.setup.configured() ? this.setup.deployment : undefined
-    const links = resolved ? { repository: resolved.repository, ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
+    const links = resolved ? { ...(resolved.repository ? { repository: resolved.repository } : {}), ...(resolved.feishu ? { feishu: resolved.feishu } : {}) } : {}
     return channel => this.sources.link(channel, links)
   }
   ticketEnvironment(ticket: Ticket): Variable[] {

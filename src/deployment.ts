@@ -50,9 +50,11 @@ export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
 export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
 
+export interface GitHubAccount { cli: string; login: string; noreply: string }
 export interface Deployment extends Machine {
+  /** Empty when the GitHub Source is not configured: no repository and no account to act as. */
   repository: string
-  github: { cli: string; login: string; noreply: string }
+  github: GitHubAccount | null
   feishu?: FeishuBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
@@ -83,11 +85,15 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
-/** Verify the agent's GitHub CLI identity and push access to the configured repository. */
+/**
+ * Verify the agent's GitHub CLI identity and push access to the configured repository. A GitHub Source that names neither
+ * repository nor CLI resolves to no GitHub account, while one that names only part of the pair stays a setup problem.
+ */
 export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
   const remote = accounts.repository
+  if (!remote && !accounts.cli) return { ...machine, repository: '', github: null }
   if (!remote) throw new SetupError('repositoryUnset')
   if (!accounts.cli) throw new SetupError('agentCliUnset')
   let cli: string

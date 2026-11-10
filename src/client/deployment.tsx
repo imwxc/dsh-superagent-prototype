@@ -45,6 +45,8 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
       return { revision: revision + 1, restarting: false }
     } })
   const accounts = setup.accounts
+  // GitHub is optional: an unset repository or agent reads as not configured rather than missing; accounts is null only while setup waits.
+  const account = (value: string): string => accounts ? value || t('deploymentGithubNone') : '—'
   // Remote browsers (`memory` mode) are read-only; `unavailable` indicates `dsh-superagent` is still starting.
   const readOnlyHint = !form ? t('deploymentNoForms') : snapshot?.mode === 'memory' ? t('deploymentReadOnly')
     : snapshot?.status === 'loading' ? t('loading') : snapshot?.status === 'unavailable' ? t('deploymentUnavailable')
@@ -62,8 +64,8 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
         <p className="dt-error" role="status"><SetupMessage problem={setup.problem} lead /></p><CheckSetupButton />
       </div>}
       {showAccounts && <Section title={t('deploymentDerived')} hint={t('deploymentDerivedHint')}>
-        <KeyValues rows={[[t('deploymentRepository'), accounts?.repository ?? '—'],
-          [t('deploymentAgent'), accounts ? `@${accounts.agent}` : '—'], [t('deploymentFeishu'), feishu]]} />
+        <KeyValues rows={[[t('deploymentRepository'), account(accounts?.repository ?? '')],
+          [t('deploymentAgent'), accounts?.agent ? `@${accounts.agent}` : account('')], [t('deploymentFeishu'), feishu]]} />
         <Hint>{t('deploymentAccountsWhere')}</Hint>
       </Section>}
       <Section title={t('deploymentMachine')}>

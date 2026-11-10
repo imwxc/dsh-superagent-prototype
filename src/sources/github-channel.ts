@@ -19,6 +19,7 @@ export async function sendGithub(host: Pick<SourceContext, 'commands'>, message:
   const { commands } = host
   const { repository, github } = commands.deployment
   const number = Number(message.channel.address.number)
+  if (!github) throw new CliError('this installation has no GitHub account')
   if (!number) throw new Error('Missing GitHub reply target')
   try {
     // Retained trigger URLs also route replies queued before thread-aware delivery.

@@ -5,7 +5,7 @@ Use this guide to install, configure and operate dsh-superagent. It covers accou
 ## What runs
 
 - **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.
-- **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
+- **Optional: an agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account. dsh-superagent also runs without one: leave the GitHub Source's repository and CLI unset, and GitHub stays unused until both are set.
 - **Optional:** a Feishu bot for chat requests.
 
 Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
@@ -21,14 +21,16 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 ## Prerequisites
 
 - Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
-- GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
-- A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
+- For GitHub: `gh` 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
+- Optional: a repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS. Without one, dsh-superagent serves its other Sources.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
 
 ## Accounts
 
-### Agent GitHub account
+### Agent GitHub account (optional)
+
+Skip this section to run without GitHub; the GitHub Source's repository and CLI then stay empty. Configuring only one of the two fails the setup check.
 
 1. Create a GitHub user account for the agent and give it write access to the repository. A GitHub App cannot be the agent, because dsh-superagent reads the account's notifications.
 2. Give it a GitHub CLI that uses only its own credentials:
@@ -144,7 +146,7 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
-1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
+1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI together, for example `/home/me/.local/bin/gh-agent`; leaving both unset runs dsh-superagent without GitHub. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
 2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
 3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
 
@@ -217,12 +219,12 @@ curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json
 
 Setup uses the DeepSeek Harness subprocess service, as worker shells do. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.
 
-Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source.
+Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. Where the GitHub Source names neither repository nor CLI, setup completes with no GitHub account: the `gh` worker shim reports that none is configured, and git selects no github.com credential helper. A Feishu setup failure disables only the Feishu Source.
 
 The process environment that setup writes:
 
-- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
-- **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
+- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI, or reports that no GitHub account is configured; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
+- **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper when one is configured, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
 
 A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write stops setup. A Ticket directory inside a git repository whose own configuration adds credentials fails the Ticket.
 
@@ -255,7 +257,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `The agent GitHub CLI was not found.` | Set the wrapper's absolute path, or a command name on `PATH` |
 | `The agent GitHub CLI cannot read its account` | Sign the wrapper in with `auth login` |
 | `@… cannot read …` or `@… cannot push to …` | Give the agent account write access to the repository |
-| `The GitHub Source names no repository.` | Set the repository, `owner/name`, on the GitHub card |
+| `The GitHub Source names no repository.` | Set the repository, `owner/name`, on the GitHub card, or clear the agent CLI to run without GitHub |
 | A Ticket fails with `The prepare command failed: …` | The output names the cause, such as a wrong clone path; fix the command, then retry the Ticket |
 | `git does not read the github.com credential configuration dsh-superagent writes` | Install git 2.32 or later |
 | A Ticket fails with `The git configuration of the repository in … sets …` | Remove the named credential or `http.*.extraheader` settings from the clone's `.git/config` |

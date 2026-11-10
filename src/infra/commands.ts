@@ -72,8 +72,14 @@ export class Commands {
       return stdout
     } catch (error) { throw commandError(error, program) }
   }
+  /** The GitHub account's CLI; GitHub calls refuse in an installation that has no GitHub account. */
+  private githubCli(): string {
+    const { github } = this.deployment
+    if (!github) throw new CliError('this installation has no GitHub account')
+    return github.cli
+  }
   /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
-  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.deployment.github.cli, args)) as T }
+  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.githubCli(), args)) as T }
   /**
    * Calls the GitHub API on a path within the configured repository, validating JSON output when a schema is provided
    * or returning raw CLI output (such as raw files or `--include` headers) when omitted.
@@ -82,7 +88,7 @@ export class Commands {
   async api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
   async api(path: string, ...flags: string[]): Promise<string>
   async api<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
-    if (typeof schema === 'string') return this.run(this.deployment.github.cli, ['api', this.path(schema), ...rest])
+    if (typeof schema === 'string') return this.run(this.githubCli(), ['api', this.path(schema), ...rest])
     const [path = '', ...flags] = rest
     return schema.parse(await this.gh(['api', this.path(path), ...flags]))
   }

@@ -325,6 +325,14 @@ describe('feishu source', () => {
   })
 })
 describe('github source', () => {
+  it('names on its health that no GitHub account is configured, and polls nothing', async () => {
+    const value = host({ sources: emptyRegistry(), deployment: testDeployment({ repository: '', github: null }) })
+    const disposers: (() => unknown)[] = []
+    applyGithub({ orchestrator: value, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never)
+    await vi.waitFor(() => expect(value.health.github).toBeDefined())
+    expect(value.health.github).toMatchObject({ state: 'paused', code: 'githubUnset' })
+    for (const dispose of disposers) await dispose()
+  })
   it('normalizes comments and reviews into triggers with review-thread channels, and marks only GitHub Apps and machine accounts as automated', () => {
     const trigger = commentTrigger({ id: 5, body: 'nit', user: { login: 'review-bot[bot]', type: 'Bot' }, html_url: 'https://github.com/acme/widgets/pull/7#discussion_r5', updated_at: '2026-09-01T00:00:00Z' }, { number: 7, isPr: true, prAuthor: 'agent-bot' }, 'inline', 'agent-bot')
     expect(trigger).toMatchObject({ source: 'github', threads: [{ source: 'github', id: '7' }], human: false, channel: { address: { number: '7', url: 'https://github.com/acme/widgets/pull/7#discussion_r5' } }, meta: { commentId: 5, kind: 'inline', prAuthor: 'agent-bot' } })

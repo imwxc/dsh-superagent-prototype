@@ -87,6 +87,11 @@ it('renders the Deployment page with the derived accounts in the Plugin Manager,
   await render('page')
   expect(text()).toContain('部署检查未通过：GitHub 来源没有设置监听的仓库。')
   expect(field<HTMLInputElement>(zh.deploymentPromptMaxChars).disabled).toBe(false)
+  // A completed setup without a GitHub account shows it as optional, never as a missing value.
+  server.setup = { ...server.setup, problem: null, accounts: { repository: '', agent: null, feishu: null } }
+  await render('page')
+  expect(text()).toContain(zh.deploymentGithubNone)
+  expect(text()).not.toContain('@null')
   server.down = true
   await render('page')
   expect(text()).toContain(zh.hostNotRunning)

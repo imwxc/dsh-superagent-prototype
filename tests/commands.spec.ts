@@ -8,11 +8,11 @@ import { githubChannel } from '../src/sources/github-trigger.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { key, type OutboundMessage } from '../src/core/index.ts'
-import { testDeployment } from './fixtures/deployment.ts'
+import { testAccount, testDeployment } from './fixtures/deployment.ts'
 const sources = new SourceRegistry(() => SettingsSchema.parse({}))
 sources.register(feishuKind); sources.register(githubKind)
 const send = (commands: Commands, message: OutboundMessage) => sources.send(message, commands)
-const deployment = testDeployment({ github: { ...testDeployment().github, cli: '/path/agent-gh' } })
+const deployment = testDeployment({ github: { ...testAccount, cli: '/path/agent-gh' } })
 const REPOSITORY = deployment.repository
 const reply = { id: 'stable-operation', channel: githubChannel(8), text: 'Done', kind: 'reply' as const }
 describe('account-isolated operations', () => {
@@ -31,6 +31,11 @@ describe('account-isolated operations', () => {
   })
   it('refuses Feishu commands when the deployment has no Feishu bot', async () => {
     await expect(new Commands(() => testDeployment({ feishu: undefined }), {}, new AbortController().signal).lark(['im', '+chat-list'])).rejects.toThrow('The Feishu Source has no working bot CLI')
+  })
+  it('refuses GitHub commands when the deployment has no GitHub account', async () => {
+    const commands = new Commands(() => testDeployment({ github: null }), {}, new AbortController().signal)
+    await expect(commands.gh(['api', 'user'])).rejects.toThrow('this installation has no GitHub account')
+    await expect(commands.api('issues?per_page=1')).rejects.toThrow('this installation has no GitHub account')
   })
   it('reconciles an uncertain GitHub send with its stable marker', async () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal)
