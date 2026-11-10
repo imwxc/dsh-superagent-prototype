@@ -19,10 +19,9 @@ const comment = (over: Record<string, unknown> = {}): Record<string, unknown> =>
   ...over,
 })
 /** One merge request in the live shape `kcli kdev mr list` prints. */
-const STAMP = Date.now() - 5_000
 const mr = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   id: 1816, title: 'feat: DSH 应用 Kim 事件中转', repoName: 'locallife/lfe/cyber-next/cyber-tower-node',
-  sourceBranch: 'feat/kim-dsh-relay', updatedAtTimeStamp: STAMP, status: 'opened', author: { username: 'wangxianchen' },
+  sourceBranch: 'feat/kim-dsh-relay', commentCount: 4, status: 'opened', author: { username: 'wangxianchen' },
   ...over,
 })
 const config = KdevConfigSchema.parse({ repos: [{ repoId: '221369', name: 'cyber-tower-node' }], self: 'wangxianchen' })
@@ -106,11 +105,11 @@ describe('pollMrComments', () => {
     const result = await pollMrComments(value, config, new AbortController().signal)
     expect(result).toEqual({ read: 2, unreadable: 2 })
     expect(received.map(item => item.id)).toEqual([kdevTriggerId('221369', '1816', base), kdevTriggerId('221369', '1816', base + 600)])
-    expect((value.state.get(record<Record<string, number>>('kdev-stamps')) as Record<string, number>)['221369']).toBe(STAMP)
+    expect((value.state.get(record<Record<string, number>>('kdev-counts')) as Record<string, number>)['221369']).toBe(4)
   })
-  it('skips a repo whose newest update stamp is unchanged, and reads it again after a new comment', async () => {
+  it('reads a repo again when a new comment raises its count', async () => {
     const list = JSON.stringify({ items: [mr()] })
-    const updated = JSON.stringify({ items: [mr({ updatedAtTimeStamp: STAMP + 60_000 })] })
+    const updated = JSON.stringify({ items: [mr({ commentCount: 5 })] })
     const { value, received } = context([list, JSON.stringify({ list: [comment()] }), updated, JSON.stringify({ list: [comment({ createdAt: stamp(300), details: { comment: { body: '@superagent 再看一眼' } } })] })])
     await pollMrComments(value, config, new AbortController().signal)
     const second = await pollMrComments(value, config, new AbortController().signal)

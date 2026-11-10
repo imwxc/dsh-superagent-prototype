@@ -10,8 +10,8 @@ import type { ChannelLink, SourceKind } from './kind.ts'
 export const SOURCE = 'kdev'
 /** Read cursor: the newest comment epoch (ms) already ingested; the first run starts at the process start and replays nothing. */
 const cursor = record<number>('kdev-cursor')
-/** Per-MR `updatedAtTimeStamp` of the last poll; a repo whose newest stamp is unchanged skips its per-MR comment reads. */
-const stamps = record<Record<string, number>>('kdev-stamps')
+/** Per-repo comment counts of the last poll; the count includes global comments, so a change means new comments to read. */
+const counts = record<Record<string, number>>('kdev-counts')
 /** The operator's KDev username, learned from `kcli whoami` on the first poll. */
 const self = record<string>('kdev-self')
 /** A poll window steps back 5 s so late-written comments are not missed; deterministic trigger IDs deduplicate the overlap. */
@@ -38,7 +38,7 @@ const CommentSchema = z.looseObject({
 })
 const MrListSchema = z.looseObject({ items: z.array(z.looseObject({
   id: z.number(), title: z.string().default(''), repoName: z.string().default(''),
-  sourceBranch: z.string().default(''), updatedAtTimeStamp: z.number().default(0),
+  sourceBranch: z.string().default(''), commentCount: z.number().default(0),
 })).default([]) })
 const CommentPageSchema = z.looseObject({ list: z.array(CommentSchema).default([]) })
 const WhoamiSchema = z.looseObject({ loginId: z.string().default('') })
@@ -92,18 +92,18 @@ export async function pollMrComments(ctx: SourceContext, config: KdevConfig, sig
   }
   const end = Date.now()
   const floor = Math.max((ctx.state.get(cursor) ?? end) - OVERLAP_MS, 0)
-  const known = ctx.state.get(stamps) ?? {}
-  const nextStamps: Record<string, number> = {}
+  const known = ctx.state.get(counts) ?? {}
+  const nextCounts: Record<string, number> = {}
   const seen = new Set<string>()
   let read = 0
   let unreadable = 0
   for (const repo of config.repos) {
     const list = MrListSchema.parse(JSON.parse(await run(['kdev', 'mr', 'list', '--repo-id', repo.repoId, '--status', 'opened', '--type', 'ALL', '--page-size', '100', '--json'])))
-    // A global comment does not move `commentCount`, so change detection uses each MR's update stamp.
-    nextStamps[repo.repoId] = list.items.reduce((max, mr) => Math.max(max, mr.updatedAtTimeStamp), 0)
-    if (known[repo.repoId] === nextStamps[repo.repoId]) continue
+    nextCounts[repo.repoId] = list.items.reduce((sum, mr) => sum + mr.commentCount, 0)
+    // A repo whose comment count is unchanged since the last poll cannot carry a new comment.
+    if (known[repo.repoId] === nextCounts[repo.repoId]) continue
     for (const mr of list.items) {
-      if ((known[`${repo.repoId}:${mr.id}`] ?? 0) >= mr.updatedAtTimeStamp) continue
+      if (mr.commentCount === 0) continue
       const page = CommentPageSchema.parse(JSON.parse(await run(['kdev', 'mr', 'comments', '--repo-id', repo.repoId, '--mr-id', String(mr.id), '--json'])))
       const context = { repoId: repo.repoId, mr: String(mr.id), title: mr.title, branch: mr.sourceBranch }
       for (const comment of page.list) {
@@ -124,7 +124,7 @@ export async function pollMrComments(ctx: SourceContext, config: KdevConfig, sig
       }
     }
   }
-  ctx.state.set(stamps, { ...known, ...nextStamps })
+  ctx.state.set(counts, nextCounts)
   ctx.state.set(cursor, end)
   return { read, unreadable }
 }
