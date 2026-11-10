@@ -20,8 +20,9 @@ const MAX_PAGES = 100
 
 const KimConfigSchema = z.object({
   cli: z.string().min(1).default('kcli'),
-  webhookUrl: z.string().url().default('https://kim-robot.kwaitalk.com/api/robot/send'),
-  webhookKey: z.string().default(''),
+  appKey: z.string().default(''),
+  secretKey: z.string().default(''),
+  gatewayUrl: z.string().url().default('https://is-gateway.corp.kuaishou.com'),
   chats: z.array(z.object({ sessionId: z.string().regex(/^\d+$/), name: z.string().trim().max(60).optional() }).strict())
     .refine(chats => new Set(chats.map(chat => chat.sessionId)).size === chats.length, 'Duplicate session IDs').default([]),
   pollSeconds: z.number().int().min(10).max(3600).default(30),
@@ -64,34 +65,51 @@ function localMinute(ms: number): string {
 }
 
 /**
- * Webhook credentials for `sendKim`. `SourceChannel.send` receives only commands, so the watch loop refreshes them every
- * cycle; the key never enters a Trigger's address or meta, which persist and reach the panel.
+ * OpenAPI credentials for `sendKim`. `SourceChannel.send` receives only commands, so the watch loop refreshes them every
+ * cycle; the secret never enters a Trigger's address or meta, which persist and reach the panel.
  */
-let sendConfig: { url: string; key: string } | undefined
+let sendConfig: { appKey: string; secretKey: string; gatewayUrl: string } | undefined
 /** The single write path for `sendConfig`; tests use it to arm the channel. */
-export function setKimSendConfig(value: { url: string; key: string } | undefined): void { sendConfig = value }
-/** Permanent webhook rejections: the chat is gone or the bot was removed; throttle and network failures stay retryable. */
-const gone = (status: number, body: string): boolean =>
-  status === 404 || status === 410 || (status === 403 && /群|chat|group/i.test(body))
+export function setKimSendConfig(value: { appKey: string; secretKey: string; gatewayUrl: string } | undefined): void { sendConfig = value }
+/** Cached access token; the gateway returns `expireTime` in seconds (12 h in practice). */
+let cachedToken: { token: string; expireAt: number } | undefined
+/** Permanent message-send rejections: the bot is not in the chat or was blacklisted; throttle and network failures stay retryable. */
+const gone = (status: number, body: string): boolean => status !== 200
+  || /101220046|10122014|不在群|黑名单/.test(body)
+/** Fetches an access token, reusing the cached one until shortly before it expires. */
+export async function kimAccessToken(config: { appKey: string; secretKey: string; gatewayUrl: string }): Promise<string> {
+  if (cachedToken && Date.now() < cachedToken.expireAt - 60_000) return cachedToken.token
+  const query = new URLSearchParams({ appKey: config.appKey, secretKey: config.secretKey })
+  const response = await fetch(`${config.gatewayUrl}/token/get?${query}`, { signal: AbortSignal.timeout(30_000) })
+    .catch((error: unknown) => { throw new Error(`Kim token request failed: ${String(error)}`) })
+  const body = await response.text().catch(() => '')
+  const parsed = JSON.parse(body || '{}') as { code?: number; message?: string; result?: { accessToken?: string; expireTime?: number } }
+  if (!response.ok || parsed.code !== 0 || !parsed.result?.accessToken) {
+    throw new Error(`Kim token refused (${parsed.code ?? response.status}): ${parsed.message ?? body.slice(0, 200)}`)
+  }
+  cachedToken = { token: parsed.result.accessToken, expireAt: Date.now() + (parsed.result.expireTime ?? 3600) * 1000 }
+  return cachedToken.token
+}
+/** Clears the cached token; tests use it between scenarios. */
+export function resetKimToken(): void { cachedToken = undefined }
 /**
- * Posts one reply as the webhook bot. The webhook takes no idempotency key, so a retried send may duplicate a message the
- * service already accepted; a duplicate update is preferred over a lost one.
+ * Posts one reply as the message-number bot. The gateway's `uniqId` deduplicates for one hour, so a retried send after a
+ * timeout does not duplicate the message; a duplicate update is still preferred over a lost one.
  */
 export async function sendKim(_host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'> {
   const session = message.channel.address.session
   if (!session) throw new Error('Missing Kim reply target')
-  if (!sendConfig?.key) throw new Error('The Kim Source is on without a webhook key')
-  const body = JSON.stringify({ msgtype: 'markdown', markdown: { content: checkedImText(message.text) }, groupIds: [session] })
-  const response = await fetch(`${sendConfig.url}?key=${encodeURIComponent(sendConfig.key)}`,
-    { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(30_000) })
-    .catch((error: unknown) => { throw new Error(`Kim webhook request failed: ${String(error)}`) })
+  if (!sendConfig?.appKey || !sendConfig.secretKey) throw new Error('The Kim Source is on without appKey or secretKey')
+  const token = await kimAccessToken(sendConfig)
+  const body = JSON.stringify({ groupId: session, msgType: 'markdown', markdown: { content: checkedImText(message.text) }, uniqId: message.id })
+  const response = await fetch(`${sendConfig.gatewayUrl}/openapi/v2/message/send`,
+    { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body, signal: AbortSignal.timeout(30_000) })
+    .catch((error: unknown) => { throw new Error(`Kim message request failed: ${String(error)}`) })
   const text = await response.text().catch(() => '')
-  if (response.ok) {
-    if (!/"messageKey"\s*:\s*"[^"]+"/.test(text)) throw new Error(`Kim webhook accepted no message: ${text.slice(0, 300)}`)
-    return 'sent'
-  }
+  const parsed = JSON.parse(text || '{}') as { status?: number; code?: number; message?: string }
+  if (parsed.status === 0 && parsed.code === 0) return 'sent'
   if (gone(response.status, text)) return 'gone'
-  throw new Error(`Kim webhook ${response.status}: ${text.slice(0, 300)}`)
+  throw new Error(`Kim message refused (${parsed.code ?? response.status}): ${(parsed.message ?? text).slice(0, 300)}`)
 }
 
 export const kimKind: SourceKind<KimConfig> = {
@@ -105,9 +123,11 @@ export const kimKind: SourceKind<KimConfig> = {
   fields: [
     { key: 'cli', type: 'text', label: { zh: 'kcli 命令', en: 'kcli command' },
       hint: { zh: '命令名或绝对路径；它以操作者的 Kim 身份读取 @ 我的消息。', en: 'A command name or absolute path; it reads the @-me feed as the operator.' } },
-    { key: 'webhookKey', type: 'text', label: { zh: '群机器人 webhook key', en: 'Group bot webhook key' },
-      hint: { zh: '目标群设置里创建自定义机器人得到的关键字；只保存在本机配置，不进入任何工单记录。', en: 'The key of a custom bot created in the target chat settings; it stays in local configuration and never enters a ticket record.' } },
-    { key: 'webhookUrl', type: 'text', advanced: true, label: { zh: 'webhook 地址', en: 'Webhook URL' } },
+    { key: 'appKey', type: 'text', label: { zh: '消息号 appKey', en: 'Message-number appKey' },
+      hint: { zh: 'OpenAPI 应用的正式环境 appKey；在 openapi.corp.kuaishou.com 我的应用里查看。', en: 'The production appKey of the OpenAPI app; see My Applications on openapi.corp.kuaishou.com.' } },
+    { key: 'secretKey', type: 'text', label: { zh: '消息号 secretKey', en: 'Message-number secretKey' },
+      hint: { zh: '配套的正式环境 secretKey；只保存在本机配置，不进入任何工单记录。', en: 'The matching production secretKey; it stays in local configuration and never enters a ticket record.' } },
+    { key: 'gatewayUrl', type: 'text', advanced: true, label: { zh: 'OpenAPI 网关地址', en: 'OpenAPI gateway URL' } },
     { key: 'chats', type: 'rows', label: { zh: '接收的群', en: 'Chats' },
       hint: { zh: '只接收这些群里的 @ 消息；sessionId 是消息里 session.groupId 的一串数字。', en: 'Receives @ messages from these chats only; a sessionId is the numeric session.groupId of a message.' },
       columns: [
@@ -198,7 +218,7 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
     const config = ctx.config<KimConfig>(SOURCE)
     if (!config) { ctx.report(SOURCE, health('paused', 'sourceOff')); setKimSendConfig(undefined) }
     else {
-      setKimSendConfig({ url: config.webhookUrl, key: config.webhookKey })
+      setKimSendConfig({ appKey: config.appKey, secretKey: config.secretKey, gatewayUrl: config.gatewayUrl })
       try {
         const { read, unreadable } = await pollAtMe(ctx, config, signal)
         failures = 0

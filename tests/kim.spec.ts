@@ -3,7 +3,7 @@ import type { Trigger } from '../src/core/index.ts'
 import { record } from '../src/kv.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import {
-  KimConfigSchema, kimKind, kimTrigger, kimTriggerId, pollAtMe, sendKim, setKimSendConfig, SOURCE,
+  KimConfigSchema, kimKind, kimTrigger, kimTriggerId, pollAtMe, sendKim, setKimSendConfig, resetKimToken, SOURCE,
 } from '../src/sources/kim.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { SettingsSchema } from '../src/policy.ts'
@@ -52,7 +52,7 @@ describe('kimTrigger', () => {
 describe('kimKind', () => {
   it('defaults its configuration and validates chats', () => {
     const config = KimConfigSchema.parse({})
-    expect(config).toMatchObject({ cli: 'kcli', webhookUrl: 'https://kim-robot.kwaitalk.com/api/robot/send', webhookKey: '', chats: [], pollSeconds: 30 })
+    expect(config).toMatchObject({ cli: 'kcli', gatewayUrl: 'https://is-gateway.corp.kuaishou.com', appKey: '', secretKey: '', chats: [], pollSeconds: 30 })
     expect(KimConfigSchema.safeParse({ chats: [{ sessionId: 'abc' }] }).success).toBe(false)
     expect(KimConfigSchema.safeParse({ chats: [{ sessionId: '1' }, { sessionId: '1' }] }).success).toBe(false)
   })
@@ -136,26 +136,42 @@ describe('pollAtMe', () => {
 
 describe('sendKim', () => {
   const message = { id: 'm1', text: 'done', channel: { source: SOURCE, thread: 'kim:7', address: { session: '7377459320328271' } } } as unknown as Parameters<typeof sendKim>[1]
-  afterEach(() => { vi.unstubAllGlobals(); setKimSendConfig(undefined) })
-  it('posts markdown to the webhook with the chat as the only group and requires a messageKey', async () => {
-    setKimSendConfig({ url: 'https://kim-robot.kwaitalk.com/api/robot/send', key: 'k-1' })
-    const fetchMock = vi.fn(async () => new Response('{"messageKey":"OMSG_out"}', { status: 200 }))
+  const arm = () => setKimSendConfig({ appKey: 'ak-1', secretKey: 'sk-1', gatewayUrl: 'https://gateway.test' })
+  afterEach(() => { vi.unstubAllGlobals(); setKimSendConfig(undefined); resetKimToken() })
+  it('fetches a token, posts markdown by group with uniqId, and reuses the cached token', async () => {
+    arm()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('{"code":0,"result":{"accessToken":"t-1","expireTime":3600}}', { status: 200 }))
+      .mockResolvedValueOnce(new Response('{"status":0,"code":0,"message":"success","data":{"messageKey":["OMSG_x"]}}', { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
     await expect(sendKim({} as Parameters<typeof sendKim>[0], message)).resolves.toBe('sent')
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
-    expect(url).toBe('https://kim-robot.kwaitalk.com/api/robot/send?key=k-1')
-    expect(JSON.parse(String(init.body))).toEqual({ msgtype: 'markdown', markdown: { content: 'done' }, groupIds: ['7377459320328271'] })
-    const silent = vi.fn(async () => new Response('{}', { status: 200 }))
-    vi.stubGlobal('fetch', silent)
-    await expect(sendKim({} as Parameters<typeof sendKim>[0], message)).rejects.toThrow(/accepted no message/)
+    const [tokenUrl] = fetchMock.mock.calls[0] as unknown as [string]
+    expect(tokenUrl).toBe('https://gateway.test/token/get?appKey=ak-1&secretKey=sk-1')
+    const [sendUrl, init] = fetchMock.mock.calls[1] as unknown as [string, RequestInit]
+    expect(sendUrl).toBe('https://gateway.test/openapi/v2/message/send')
+    expect(init.headers).toMatchObject({ authorization: 'Bearer t-1' })
+    expect(JSON.parse(String(init.body))).toEqual({ groupId: '7377459320328271', msgType: 'markdown', markdown: { content: 'done' }, uniqId: 'm1' })
+    // The second send reuses the cached token and goes straight to message/send.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('{"status":0,"code":0}', { status: 200 })))
+    await expect(sendKim({} as Parameters<typeof sendKim>[0], message)).resolves.toBe('sent')
   })
-  it('reports a gone chat, retries other failures, and refuses without a key', async () => {
-    setKimSendConfig({ url: 'https://x/', key: 'k-1' })
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('no such group', { status: 404 })))
+  it('refuses an error token answer and reports gateway refusals as retryable failures', async () => {
+    arm(); resetKimToken()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('{"code":40109,"message":"secret.key.error"}', { status: 200 })))
+    await expect(sendKim({} as Parameters<typeof sendKim>[0], message)).rejects.toThrow(/40109/)
+    arm(); resetKimToken()
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response('{"code":0,"result":{"accessToken":"t-2","expireTime":3600}}', { status: 200 }))
+      .mockResolvedValueOnce(new Response('{"status":5,"code":10122013,"message":"限流"}', { status: 200 })))
+    await expect(sendKim({} as Parameters<typeof sendKim>[0], message)).rejects.toThrow(/10122013/)
+  })
+  it('reports a gone chat, and refuses without credentials', async () => {
+    arm(); resetKimToken()
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response('{"code":0,"result":{"accessToken":"t-3","expireTime":3600}}', { status: 200 }))
+      .mockResolvedValueOnce(new Response('{"status":5,"code":101220046,"message":"机器人不在群"}', { status: 200 })))
     await expect(sendKim({} as Parameters<typeof sendKim>[0], message)).resolves.toBe('gone')
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('many requests', { status: 429 })))
-    await expect(sendKim({} as Parameters<typeof sendKim>[0], message)).rejects.toThrow(/429/)
     setKimSendConfig(undefined)
-    await expect(sendKim({} as Parameters<typeof sendKim>[0], message)).rejects.toThrow(/webhook key/)
+    await expect(sendKim({} as Parameters<typeof sendKim>[0], message)).rejects.toThrow(/appKey or secretKey/)
   })
 })
