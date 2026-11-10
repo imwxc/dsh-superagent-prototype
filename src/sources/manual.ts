@@ -1,7 +1,6 @@
 /** Built-in Manual source: the operator injects a message through the management API, and the agent's replies settle on the panel. */
 import { z } from 'zod'
 import type { ChannelRef, OutboundMessage, Trigger } from '../core/index.ts'
-import { checkedImText } from '../infra/text.ts'
 import type { ChannelLink, SourceKind } from './kind.ts'
 
 export const SOURCE = 'manual'
@@ -44,7 +43,7 @@ export const manualKind: SourceKind<Record<string, never>> = {
   channel: {
     allowed: () => true,
     // The panel thread already shows the agent's work; the IM receipt settles immediately instead of retrying forever.
-    send: async (_host, message) => { checkedImText(message.text); return 'sent' },
+    send: async () => 'sent',
     link: (address): ChannelLink => ({ url: '', label: { zh: '本地对话', en: 'Manual chat' } }),
   },
 }

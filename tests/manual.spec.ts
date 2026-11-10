@@ -32,3 +32,22 @@ describe('manualTrigger', () => {
     await expect(send({ commands: { withSignal: () => ({ run: async () => '' }) } } as unknown as Parameters<typeof send>[0], message)).resolves.toBe('sent')
   })
 })
+
+describe('policy gate on a fresh state', () => {
+  // Regression anchor for the omo review P0: the kind's built-in roster must admit the operator on a state
+  // where the manual policy part was never stored (a fresh desktop instance), without any seeding.
+  it('admits the first manual message as explicit without a stored policy part', async () => {
+    const { SettingsSchema } = await import('../src/policy.ts')
+    const { SourceRegistry } = await import('../src/sources/registry.ts')
+    const { settingsPolicy } = await import('../src/policy.ts')
+    const { HealthBoard } = await import('../src/infra/health.ts')
+    const registry = new SourceRegistry(() => SettingsSchema.parse({}), new HealthBoard())
+    registry.register(manualKind)
+    const fresh = SettingsSchema.parse({})
+    expect(fresh.policy.sources.manual).toBeUndefined()
+    const policy = settingsPolicy(fresh, registry)
+    const trigger = manualTrigger('第一条消息', 'chat-9', 'regression-1')
+    const thread = { key: 'manual:chat-9', ref: { source: SOURCE, id: 'chat-9' }, createdAt: '', subscriptions: [], correlated: [], pending: [], meta: {} }
+    expect(policy.gate(trigger, thread, [])).toMatchObject({ admissible: true, strength: 'explicit', basis: { via: 'addressed', addressed: 'direct' } })
+  })
+})

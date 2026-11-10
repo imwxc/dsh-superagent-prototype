@@ -45,7 +45,7 @@ function setup(strength: 'explicit' | 'inferred' = 'inferred', bodies = Array.fr
   const policy: Policy = { version: 'v1', paused: false, evalTimeoutMs: 600_000, gate: () => ({ admissible: true, strength, basis: { via: 'followup' } }),
     revalidate: () => true, admitsInferred: rules => rules.length > 0 }
   const executor: Executor = { start: async () => {}, deliver: async () => {}, stop: async () => {} }
-  const scope = { scope: () => ({ listened: true as const, observed: true }) }
+  const scope = { scope: () => ({ listened: true as const, observed: true }), listedSender: () => undefined }
   const outbox = { send: () => {}, status: () => undefined, withdraw: () => {} }
   engine = new Engine({ repo, policy: () => policy, scope, assessor, executor, outbox })
   const tools: Record<string, (args: unknown, signal: AbortSignal) => Promise<unknown>> = {}

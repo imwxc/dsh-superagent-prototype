@@ -149,7 +149,7 @@ const count = z.coerce.number().int().nonnegative()
 const PromptsQuery = z.object({ revision: count.optional(), offset: count.default(0) })
 /** One operator message injected from the management panel/API; a session id keeps separate conversations on separate threads. */
 const ManualTriggerSchema = z.object({
-  text: z.string().trim().min(1).max(100_000),
+  text: z.string().trim().min(1).max(30_000),
   sessionId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).optional(),
 })
 const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])

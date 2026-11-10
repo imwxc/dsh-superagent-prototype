@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SettingsSchema, assessmentOutcome, policyEffects, settingsPolicy, policyVersion, allowedSender, anyoneAllowed, type Settings } from '../src/policy.ts'
+import { SettingsSchema, assessmentOutcome, policyEffects, settingsPolicy, policyVersion, anyoneAllowed, type Settings } from '../src/policy.ts'
 import type { MandateBasis } from '../src/core/index.ts'
 import { migrateSettings } from '../src/app/migration.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
@@ -59,8 +59,8 @@ describe('gate', () => {
   })
   it('checks each Source\'s own list: a Feishu id allows nothing on GitHub', () => {
     expect(policy.gate(github(MEMBER, 'mention'), thread(), [])).toEqual({ admissible: false, reason: 'not_a_member' })
-    expect(allowedSender(base, { source: 'github', id: 'ALICE' })).toEqual({ id: 'Alice' })
-    expect(allowedSender(base, { source: 'feishu', id: 'Alice' })).toBeUndefined()
+    expect(sources.listedSender('github', { id: 'ALICE' })).toEqual({ id: 'Alice' })
+    expect(sources.listedSender('feishu', { id: 'Alice' })).toBeUndefined()
     expect(anyoneAllowed(base)).toBe(true)
     expect(anyoneAllowed(SettingsSchema.parse({}))).toBe(false)
   })
@@ -293,7 +293,7 @@ describe('assessment outcomes', () => {
     expect(assessmentOutcome(accept(auto, false), auto, 'inferred')).toMatchObject({ kind: 'ignore', reason: { code: 'noRuleMatched' } })
     expect(() => assessmentOutcome({ ...accept(auto), rule_assessments: [] }, auto, 'inferred')).toThrow('Exactly one assessment for every enabled rule')
     expect(() => assessmentOutcome({ ...accept(auto), intent_evidence: null }, auto, 'inferred')).toThrow('Acceptance requires intent_evidence')
-    const scope = { scope: () => ({ listened: true as const, observed: true }) }
+    const scope = { scope: () => ({ listened: true as const, observed: true }), listedSender: () => undefined }
     const enabled = auto.policy.rules.find(rule => rule.enabled)!.id
     expect(settingsPolicy(auto, scope).admitsInferred([enabled])).toBe(true)
     expect(settingsPolicy(auto, scope).admitsInferred(['unknown'])).toBe(false)
@@ -344,7 +344,7 @@ describe('rule judgements', () => {
   })
 })
 describe('policy effects', () => {
-  const scope = () => ({ scope: () => ({ listened: true as const, observed: true }) })
+  const scope = () => ({ scope: () => ({ listened: true as const, observed: true }), listedSender: () => undefined })
   const base = SettingsSchema.parse({ policy: { rules: [{ id: 'copy', name: 'Copy', enabled: true, instruction: 'Fix typos.' },
     { id: 'visual', name: 'Visual', enabled: true, instruction: 'Fix colors.' }],
     sources: { feishu: { allowed: [{ id: 'ou_alice' }] } } } })
@@ -392,7 +392,7 @@ describe('policy effects', () => {
     const chat = 'oc_1111111111111111111111111111'
     const table = (cell: 'inferred' | 'ignore', mode: 'auto' | 'observe' = 'auto') => SettingsSchema.parse({ ...base, eval: { ...base.eval, mode },
       policy: { ...base.policy, sources: { feishu: { ...base.policy.sources.feishu!, admission: { [chat]: { unlistedUnaddressed: cell } } } } } })
-    const observed = () => ({ scope: () => ({ listened: true as const, observed: true, row: chat }) })
+    const observed = () => ({ scope: () => ({ listened: true as const, observed: true, row: chat }), listedSender: () => undefined })
     const proactive = ticket('t3', { strength: 'inferred', actor: { source: 'feishu', id: 'ou_guest' }, scope: '',
       basis: { via: 'admission', cell: 'unlistedUnaddressed', source: 'feishu', scope: { chatId: chat }, row: chat, rules: ['copy'],
         observation: { mode: 'auto' } } })

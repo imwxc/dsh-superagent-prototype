@@ -34,7 +34,7 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
     ...policyOverrides,
   }
   let clock = 0
-  const scope: EngineOptions['scope'] = { scope: t => t.meta.blocked ? { listened: false, reason: 'chat not allowed' } : { listened: true, observed: false } }
+  const scope: EngineOptions['scope'] = { listedSender: () => undefined, scope: t => t.meta.blocked ? { listened: false, reason: 'chat not allowed' } : { listened: true, observed: false } }
   const queued: EngineOptions['outbox'] = {
     send: message => { if (!outbox.some(item => item.id === message.id)) outbox.push(message) },
     status: id => outbox.some(item => item.id === id) ? 'pending' : undefined,

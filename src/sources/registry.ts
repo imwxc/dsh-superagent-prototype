@@ -1,5 +1,6 @@
 /** Registry of installed Source kinds, their configured instances, and the Engine's SourceScope implementation. */
 import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger } from '../core/index.ts'
+import { sameName } from '../infra/text.ts'
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { AdmissionTableSchema, type Settings } from '../policy.ts'
@@ -64,6 +65,10 @@ export class SourceRegistry implements SourceScope {
       const { admission, ...rest } = part
       return [id, policy ? { ...policy.schema.parse(rest), admission: AdmissionTableSchema.parse(admission ?? {}) } : part as Record<string, unknown> & { allowed: { id: string; name?: string }[] }]
     }))
+  }
+  /** The kind-effective allowed entry (kind schema defaults applied, unlike the raw stored policy); undefined for uninstalled kinds or unlisted senders. */
+  listedSender(source: string, actor: { id: string }, settings?: ReturnType<typeof this.settings>) {
+    return this.policyPart(source, settings)?.allowed.find(entry => sameName(entry.id, actor.id))
   }
   policyPart(id: string, settings = this.settings()) {
     const policy = this.kinds.get(id)?.policy

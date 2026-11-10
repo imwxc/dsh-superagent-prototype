@@ -2,7 +2,7 @@
 import { z } from 'zod'
 import { canRetry, followupOwners, latestReport, liveTicket, settled, threadKey, ticketStage, type ActorRef, type ChannelRef, type Decision,
   type DecisionKind, type Thread, type ThreadFacts, type Ticket, type TicketStage, type Trigger } from '../../core/index.ts'
-import { allowedSender, listedBot } from '../../policy.ts'
+import { listedBot } from '../../policy.ts'
 import type { ChannelLink, Localized } from '../../sources/kind.ts'
 import type { SourceRegistry } from '../../sources/registry.ts'
 import { workerSessionId } from '../../executor/dsh.ts'
@@ -59,7 +59,7 @@ export function snapshot(host: ViewHost): Snapshot {
   const named = (name: string) => ({ zh: name, en: name })
   const actor = ({ source, id }: ActorRef, human?: boolean): ActorView => {
     if (!id) return { source, id }
-    const entry = allowedSender(settings, { source, id }) ?? listedBot(settings, { source, id })
+    const entry = sources.listedSender(source, { id }) ?? listedBot(settings, { source, id })
     if (entry) return { source, id, name: named(entry.name || entry.id) }
     const unnamed = sources.kind(source)?.policy?.unnamed
     return { source, id, name: unnamed ? human === false ? unnamed.bot : unnamed.person : named(id) }
