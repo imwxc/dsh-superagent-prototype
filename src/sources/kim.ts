@@ -29,6 +29,8 @@ const KimConfigSchema = z.object({
   pollSeconds: z.number().int().min(10).max(3600).default(30),
   callbackPort: z.number().int().min(0).max(65535).default(8790),
   callbackToken: z.string().trim().max(128).default(''),
+  relayUrl: z.string().trim().default('').refine(value => !value || URL.canParse(value), 'relayUrl must be a URL'),
+  relayToken: z.string().trim().max(128).default(''),
 }).strict()
 export type KimConfig = z.infer<typeof KimConfigSchema>
 export { KimConfigSchema }
@@ -196,6 +198,46 @@ function closeCallbackServer(server: http.Server): Promise<void> {
   return new Promise(resolve => { if (!server.listening) resolve(); else server.close(() => resolve()) })
 }
 
+/** One relayed event from the tower `pull` endpoint (its envelope nests the array under `data.data`). */
+const RelayPageSchema = z.object({
+  data: z.object({
+    code: z.number(),
+    data: z.array(z.object({ id: z.string(), payload: z.unknown() })).default([]),
+  }).passthrough(),
+}).passthrough()
+/**
+ * Drains the tower relay (pull → ingest → ack) when the Source cannot receive the gateway's push directly;
+ * the deterministic trigger IDs deduplicate events the gateway re-delivers after a lost ack.
+ */
+export async function relayPull(ctx: SourceContext, config: KimConfig, signal: AbortSignal): Promise<{ read: number }> {
+  if (!config.relayToken) throw new Error('The Kim relay is on without relayToken')
+  const pull = await fetch(`${config.relayUrl}/towerApi/kim/dsh/pull?limit=50`, { headers: { 'x-relay-token': config.relayToken }, signal: AbortSignal.timeout(30_000) })
+    .catch((error: unknown) => { throw new Error(`Kim relay pull failed: ${String(error)}`) })
+  const body = await pull.json().catch(() => ({}))
+  if (!pull.ok) throw new Error(`Kim relay pull refused (${pull.status}): ${JSON.stringify(body).slice(0, 200)}`)
+  const page = RelayPageSchema.parse(body)
+  if (page.data.code !== 1) throw new Error(`Kim relay pull refused: ${JSON.stringify(body).slice(0, 200)}`)
+  const read = []
+  for (const event of page.data.data) {
+    if (signal.aborted) throw new Error('The Kim Source stopped during the read')
+    const trigger = kimCallbackTrigger(event.payload)
+    if (!trigger) continue
+    await ctx.receive(trigger)
+    for (const ref of trigger.threads)
+      ctx.threads.describe(threadKey(ref), { facts: { chat: { label: { zh: '群', en: 'Chat' }, value: String(trigger.meta.sessionId) } } })
+    read.push(event.id)
+  }
+  if (read.length) {
+    const ack = await fetch(`${config.relayUrl}/towerApi/kim/dsh/ack`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-relay-token': config.relayToken }, body: JSON.stringify({ ids: read }), signal: AbortSignal.timeout(30_000) })
+      .catch((error: unknown) => { throw new Error(`Kim relay ack failed: ${String(error)}`) })
+    const ackBody = await ack.json().catch(() => ({}))
+    if (!ack.ok) throw new Error(`Kim relay ack refused (${ack.status}); the next pull reads the same ${read.length} events again`)
+    const acked = RelayPageSchema.parse(ackBody)
+    if (acked.data.code !== 1) throw new Error(`Kim relay ack refused; the next pull reads the same ${read.length} events again`)
+  }
+  return { read: read.length }
+}
+
 export const kimKind: SourceKind<KimConfig> = {
   kind: SOURCE,
   title: { zh: 'Kim', en: 'Kim' },
@@ -222,6 +264,10 @@ export const kimKind: SourceKind<KimConfig> = {
       hint: { zh: '接收 Kim 事件回调的 HTTP 端口；在 subscribe/update 注册 http://<主机>:<端口>/kim/callback。', en: 'The HTTP port for Kim event callbacks; register http://<host>:<port>/kim/callback through subscribe/update.' } },
     { key: 'callbackToken', type: 'text', label: { zh: '回调校验 token', en: 'Callback token' },
       hint: { zh: '与 subscribe/update 注册的 token 一致；回调携带不匹配 token 会被拒绝。', en: 'The token registered through subscribe/update; callbacks carrying a mismatching token are rejected.' } },
+    { key: 'relayUrl', type: 'text', advanced: true, label: { zh: '中转队列地址', en: 'Relay URL' },
+      hint: { zh: '网关推不到本机时，填 tower 中转的地址（如 https://cyber-tower.kproxy.corp.kuaishou.com），每轮轮询拉取其事件。', en: 'When the gateway cannot reach this machine, the tower relay base URL (e.g. https://cyber-tower.kproxy.corp.kuaishou.com) is polled for events every cycle.' } },
+    { key: 'relayToken', type: 'text', advanced: true, label: { zh: '中转队列 token', en: 'Relay token' },
+      hint: { zh: '与 tower 的 kimRelayToken 一致。', en: 'The same value as the tower\'s kimRelayToken.' } },
   ],
   health: ['kim', 'kim-callback'],
   scope({ meta }, config) {
@@ -322,6 +368,7 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
         }
       }
       try {
+        if (config.relayUrl) await relayPull(ctx, config, signal)
         const { read, unreadable } = await pollAtMe(ctx, config, signal)
         failures = 0
         ctx.report(SOURCE, { state: 'ready', detail: `${read} messages, ${unreadable} unreadable`, at: new Date().toISOString() })

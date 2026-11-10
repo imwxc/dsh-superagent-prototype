@@ -3,8 +3,8 @@ import type { Trigger } from '../src/core/index.ts'
 import { record } from '../src/kv.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import {
-  KimConfigSchema, kimCallbackTrigger, kimKind, kimTrigger, kimTriggerId, pollAtMe, sendKim, setKimSendConfig, resetKimToken,
-  startCallbackServer, SOURCE,
+  KimConfigSchema, kimCallbackTrigger, kimKind, kimTrigger, kimTriggerId, pollAtMe, relayPull, sendKim, setKimSendConfig,
+  resetKimToken, startCallbackServer, SOURCE,
 } from '../src/sources/kim.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { SettingsSchema } from '../src/policy.ts'
@@ -258,3 +258,44 @@ async function closeCallbackServerForTest(server: import('node:http').Server): P
   await new Promise(resolve => setTimeout(resolve, 20))
   await new Promise<void>(resolve => server.close(() => resolve()))
 }
+
+describe('relayPull', () => {
+  /** The tower response envelope nests the page under `data.data`; one group event plus one p2p event. */
+  const envelope = (events: { id: string; payload: unknown }[]) => new Response(JSON.stringify({
+    code: 0, success: true, traceId: 't', status: 0, message: '',
+    data: { code: 1, message: 'SUCCESS', data: events, queueSize: events.length },
+  }), { status: 200 })
+  const config = KimConfigSchema.parse({ chats: [{ sessionId: '7377459320328271' }], relayUrl: 'https://tower.test', relayToken: 'tok-1' })
+
+  function recordingContext() {
+    const received: Trigger[] = []
+    const value = {
+      receive: async (trigger: Trigger) => { received.push(trigger) },
+      threads: { describe: () => {} },
+    } as unknown as SourceContext
+    return { value, received }
+  }
+
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('ingests relayed events and acks only the translated ones', async () => {
+    const { value, received } = recordingContext()
+    const group = callbackEvent()
+    const p2p = callbackEvent({ info: { ...group.info as object, sessionType: 'p2p' } })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(envelope([{ id: 'e-1', payload: group }, { id: 'e-2', payload: p2p }]))
+      .mockResolvedValueOnce(envelope([]))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(relayPull(value, config, new AbortController().signal)).resolves.toEqual({ read: 1 })
+    expect(received.map(item => item.id)).toEqual([kimTriggerId('OMSG_callone')])
+    const [, ackInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit]
+    expect(String(ackInit.body)).toBe(JSON.stringify({ ids: ['e-1'] }))
+  })
+  it('refuses a relay without a token, and an error page keeps events queued', async () => {
+    const { value } = recordingContext()
+    const noToken = KimConfigSchema.parse({ relayUrl: 'https://tower.test' })
+    await expect(relayPull(value, noToken, new AbortController().signal)).rejects.toThrow(/without relayToken/)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('relay token mismatch', { status: 403 })))
+    await expect(relayPull(value, config, new AbortController().signal)).rejects.toThrow(/pull refused/)
+  })
+})
