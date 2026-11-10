@@ -17,6 +17,7 @@
     "./github-watch": "./lib/github-watch.js",
     "./feishu-watch": "./lib/feishu-watch.js",
     "./kim-watch": "./lib/kim-watch.js",
+    "./kdev-watch": "./lib/kdev-watch.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
