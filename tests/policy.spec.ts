@@ -344,7 +344,8 @@ describe('rule judgements', () => {
   })
 })
 describe('policy effects', () => {
-  const scope = () => ({ scope: () => ({ listened: true as const, observed: true }), listedSender: () => undefined })
+  const scope = (settings: Settings = base) => ({ scope: () => ({ listened: true as const, observed: true }),
+    listedSender: (_source: string, actor: { id: string }) => (settings.policy.sources.feishu?.allowed ?? []).some(entry => entry.id === actor.id) ? { id: actor.id, ...(actor.id === 'ou_alice' ? { name: 'Alice' } : {}) } : undefined })
   const base = SettingsSchema.parse({ policy: { rules: [{ id: 'copy', name: 'Copy', enabled: true, instruction: 'Fix typos.' },
     { id: 'visual', name: 'Visual', enabled: true, instruction: 'Fix colors.' }],
     sources: { feishu: { allowed: [{ id: 'ou_alice' }] } } } })
